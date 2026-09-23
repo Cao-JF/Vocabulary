@@ -204,6 +204,9 @@ tr.dup{opacity:.5}
 .picklist label{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border);cursor:pointer}
 .picklist label:last-child{border-bottom:0}
 .picklist input{width:auto;min-height:0;flex:none}
+.flash .zh .pos{font-size:15px}
+.flash .zh + .zh{font-size:19px;font-weight:500}
+.wsub .sense + .sense{margin-left:10px}
 .picklist .pz{color:var(--muted);font-size:13px;margin-left:auto;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:50%}
 
 /* ---------- 專心看 ---------- */
@@ -260,7 +263,16 @@ const Store = {
     try{ const raw = localStorage.getItem(KEY); if(raw) d = JSON.parse(raw); }catch(e){ console.warn("load failed",e); }
     this.data = Object.assign(this.defaults(), d||{});
     this.data.settings = Object.assign(this.defaults().settings, this.data.settings||{});
+    if(this.migrate()) this.save();
     return this.data;
+  },
+  /* 舊資料只有單一 pos/zh：把擠在中文裡的「（名詞）…」拆成多組詞性 */
+  migrate(){
+    let n = 0;
+    Object.values(this.data.words).forEach(w=>{
+      if(!Array.isArray(w.senses)){ setSenses(w, parseSenses(w.zh, w.pos)); n++; }
+    });
+    return n;
   },
   save(){
     try{ localStorage.setItem(KEY, JSON.stringify(this.data)); }
@@ -279,7 +291,30 @@ const Store = {
       phonetic:o.phonetic||"", example:o.example||"", createdAt:Date.now(),
       stats:{ seen:0, correct:0, wrong:0, lastSeen:0, box:1 }
     };
+    setSenses(w, o.senses || parseSenses(o.zh, o.pos));
     this.data.words[w.id]=w; return w;
+  },
+  /* 把 dup 併進 keep：詞性與中文取聯集、補空白欄位、單字組與自選清單改指向 keep */
+  mergeWords(keepId, dupId){
+    const k = this.data.words[keepId], d = this.data.words[dupId];
+    if(!k || !d || k===d) return;
+    const ks = wordSenses(k).map(x=>({...x}));
+    wordSenses(d).forEach(x=>{
+      if(!x.zh && !x.pos) return;
+      const t = ks.find(y=>y.pos===x.pos);
+      if(!t){ ks.push({...x}); return; }
+      const have = new Set(t.zh.split(/[；;]/).map(z=>z.trim()));
+      const add = x.zh.split(/[；;]/).map(z=>z.trim()).filter(z=>z && !have.has(z));
+      if(add.length) t.zh = [t.zh, ...add].filter(Boolean).join("；");
+    });
+    setSenses(k, ks);
+    if(!k.phonetic) k.phonetic = d.phonetic||"";
+    if(!k.example)  k.example  = d.example||"";
+    if((d.stats?.seen||0) > (k.stats?.seen||0)) k.stats = d.stats;
+    const swap = arr=>[...new Set(arr.map(id=>id===dupId ? keepId : id))];
+    this.data.groups.forEach(g=>{ g.wordIds = swap(g.wordIds); });
+    Object.values(this.data.quizPicks||{}).forEach(arr=>{ const u = swap(arr); arr.length = 0; arr.push(...u); });
+    delete this.data.words[dupId];
   },
   deleteWords(ids){
     ids.forEach(id=>{ delete this.data.words[id]; });
@@ -498,6 +533,8 @@ const Lookup = {
       '{"term":"","pos":"","zh":"","phonetic":"","example":""}\n'+
       'pos uses short forms: n. / v. / adj. / adv. / prep. / conj. / pron. / int.\n'+
       'zh is Traditional Chinese (台灣用語), multiple senses separated by "；", at most 3 senses.\n'+
+      'If the word is also commonly used as another part of speech, add it to zh prefixed with that part of speech, '+
+      'e.g. for "executive": pos "adj.", zh "主管的、行政的；n. 主管、經理".\n'+
       "phonetic includes the slashes, e.g. /ˈæp.əl/.\n"+
       "Keep term exactly as given.\n\nWords:\n" + terms.join("\n");
   },
@@ -607,6 +644,71 @@ const Lookup = {
 };
 
 /* =====================================================================
+   詞性／多義：每個單字可以有多組 {pos, zh}
+   w.senses 是正本；w.pos（第一組詞性）與 w.zh（全部中文用「；」串起來）
+   只是給搜尋、判斷「有沒有中文」用的摘要，一律透過 setSenses 更新。
+   ===================================================================== */
+const POS_CN = { "名詞":"n.", "動詞":"v.", "及物動詞":"v.", "不及物動詞":"v.", "形容詞":"adj.", "副詞":"adv.",
+  "介系詞":"prep.", "介詞":"prep.", "連接詞":"conj.", "連詞":"conj.", "代名詞":"pron.", "感嘆詞":"int.",
+  "片語":"phr.", "動詞片語":"phr." };
+const POS_ABBR_RE = /^(n|v|vt|vi|adj|adv|prep|conj|pron|int|phr|aux|det|num|art)\.?$/i;
+function normPos(p){
+  p = String(p||"").trim();
+  if(!p) return "";
+  if(POS_CN[p]) return POS_CN[p];
+  if(POS_ZH[p.toLowerCase()]) return POS_ZH[p.toLowerCase()];
+  if(POS_ABBR_RE.test(p)) return p.toLowerCase().replace(/\.?$/, ".");
+  return p;
+}
+function isPos(p){ p = String(p||"").trim(); return !!(POS_CN[p] || POS_ZH[p.toLowerCase()] || POS_ABBR_RE.test(p)); }
+/* 把「主管的、行政的；（名詞）主管、經理」或「adj. 主管的；n. 主管」拆成多組。
+   「（刊物）期、號」這種不是詞性的括號會留在原本那組裡。 */
+function parseSenses(zh, pos){
+  let cur = { pos:normPos(pos), zh:[] };
+  const out = [cur];
+  String(zh||"").split(/[；;]/).map(x=>x.trim()).filter(Boolean).forEach(seg=>{
+    let p = "", rest = seg, m;
+    if((m = seg.match(/^[（(]\s*([^）)]+?)\s*[）)]\s*(.*)$/)) && isPos(m[1])){ p = normPos(m[1]); rest = m[2]; }
+    else if((m = seg.match(/^(n|v|vt|vi|adj|adv|prep|conj|pron|int|phr)\.\s*(.+)$/i))){ p = normPos(m[1]); rest = m[2]; }
+    if(p && p!==cur.pos){
+      const same = out.find(x=>x.pos===p);
+      if(same) cur = same;
+      else if(!cur.zh.length) cur.pos = p;
+      else { cur = { pos:p, zh:[] }; out.push(cur); }
+    }
+    if(rest) cur.zh.push(rest);
+  });
+  const res = out.map(x=>({ pos:x.pos, zh:x.zh.join("；") }));
+  const withZh = res.filter(x=>x.zh);
+  return withZh.length ? withZh : [res[0]];
+}
+function wordSenses(w){
+  return (w.senses && w.senses.length) ? w.senses : [{ pos:w.pos||"", zh:w.zh||"" }];
+}
+function setSenses(w, arr){
+  arr = (arr||[]).map(x=>({ pos:normPos(x.pos), zh:String(x.zh||"").trim() })).filter(x=>x.pos || x.zh);
+  if(!arr.length) arr = [{ pos:"", zh:"" }];
+  w.senses = arr;
+  w.pos = arr[0].pos;
+  w.zh = arr.map(x=>x.zh).filter(Boolean).join("；");
+}
+/* 測驗每題隨機考其中一組有中文的意思 */
+function pickSense(w){
+  const ss = wordSenses(w).filter(x=>x.zh);
+  return ss.length ? ss[Math.floor(Math.random()*ss.length)] : { pos:w.pos||"", zh:w.zh||"" };
+}
+/* 把中文拆成一個個意思（去掉括號說明），用來判斷兩個字的意思有沒有撞在一起 */
+function zhItems(zh){
+  return String(zh||"").replace(/[（(][^）)]*[）)]/g, "").split(/[、；;,，\/]/).map(x=>x.trim()).filter(Boolean);
+}
+function senseHTML(x){ return (x.pos ? '<span class="pos">'+esc(x.pos)+'</span> ' : '') + esc(x.zh); }
+function sensesText(w){ return wordSenses(w).map(x=>(x.pos ? x.pos+" " : "")+x.zh).join("　"); }
+
+/* 清單編號與項目符號：「1. apple」「(2) apple」「- apple」 */
+const NUM_RE = /^\s*(?:[-•*·‧]\s*|\(?\d{1,3}\s*[.)、．:：]\s*)/;
+function stripNum(t){ return String(t||"").replace(NUM_RE, "").trim(); }
+
+/* =====================================================================
    小工具
    ===================================================================== */
 function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
@@ -647,7 +749,7 @@ function parseImport(text){
   const rows = [];
   const seen = new Set();
   text.split(/\r?\n/).forEach(line=>{
-    const raw = line.trim();
+    const raw = stripNum(line);
     if(!raw) return;
     let parts;
     if(raw.includes("|")) parts = raw.split("|");
@@ -662,11 +764,11 @@ function parseImport(text){
     seen.add(key);
 
     let pos="", zh="";
-    if(parts.length>=3){ pos=parts[1]; zh=parts.slice(2).join(" "); }
-    else if(parts.length===2){
-      /* 第二欄若長得像詞性就當詞性，否則當中文 */
-      if(/^(n|v|adj|adv|prep|conj|pron|int|art|num|det)\.?$/i.test(parts[1])) pos=parts[1];
-      else zh=parts[1];
+    /* 第二欄若長得像詞性就當詞性，否則當中文。
+       中文欄可以寫多組詞性：「adj. 主管的；n. 主管」，存檔時再拆開 */
+    if(parts.length>=2){
+      if(isPos(parts[1])){ pos=parts[1]; zh=parts.slice(2).join("；"); }
+      else zh=parts.slice(1).join("；");
     }
     const exist = Store.findByTerm(term);
     rows.push({
@@ -736,7 +838,8 @@ Views.import = function(root){
   <div class="card">
     <h1>大量匯入單字</h1>
     <p class="hint">一行一個單字，貼上就好。系統會自動補上詞性、中文與音標。<br>
-      也接受 <code>apple, 蘋果</code> 或 <code>apple | n. | 蘋果</code>（用逗號、Tab 或直線分隔，從 Excel 直接貼也可以）。</p>
+      也接受 <code>apple, 蘋果</code> 或 <code>apple | n. | 蘋果</code>（用逗號、Tab 或直線分隔，從 Excel 直接貼也可以）。<br>
+      一個字有多種詞性：<code>executive | adj. 主管的；n. 主管</code>。開頭的「1.」「2)」編號會自動去掉。</p>
     <textarea id="imp" rows="8" placeholder="apple&#10;determine&#10;in spite of&#10;resilient, 有韌性的"></textarea>
     <div class="row" style="margin-top:12px">
       <button class="btn primary" id="parseBtn">解析並自動查詢</button>
@@ -952,9 +1055,9 @@ Views.words = function(root){
         <input type="checkbox" class="sel" data-id="${w.id}" style="width:auto;min-height:0"${selected.has(w.id)?" checked":""}>
         <span class="boxdot b${w.stats?.box||1}" title="熟練度 ${w.stats?.box||1}/5"></span>
         <div class="wmain">
-          <div class="wterm">${esc(w.term)} ${w.pos?'<span class="pos">'+esc(w.pos)+'</span>':''}
+          <div class="wterm">${esc(w.term)}
             ${w.phonetic?'<span class="muted" style="font-size:12px">'+esc(w.phonetic)+'</span>':''}</div>
-          <div class="wsub">${w.zh?esc(w.zh):'<span style="color:var(--bad)">（缺中文）</span>'}</div>
+          <div class="wsub">${w.zh?wordSenses(w).map(x=>'<span class="sense">'+senseHTML(x)+'</span>').join(""):'<span style="color:var(--bad)">（缺中文）</span>'}</div>
         </div>
         ${speakBtn(w.term)}
         <button class="btn sm ghost" data-edit="${w.id}">編輯</button>
@@ -1009,8 +1112,11 @@ function editWord(id, after){
   const w = Store.data.words[id]; if(!w) return;
   const m = modal(`<h2>編輯單字</h2>
     <label class="field"><span>單字</span><input type="text" id="e_term" value="${esc(w.term)}"></label>
-    <label class="field"><span>詞性</span><input type="text" id="e_pos" value="${esc(w.pos)}" placeholder="n. / v. / adj."></label>
-    <label class="field"><span>中文</span><input type="text" id="e_zh" value="${esc(w.zh)}"></label>
+    <div class="field" style="margin-bottom:12px">
+      <span style="display:block;font-size:13px;color:var(--muted);margin-bottom:5px">詞性與中文（有多種詞性就各加一行）</span>
+      <div id="e_senses" style="display:grid;gap:6px"></div>
+      <button class="btn sm ghost" id="e_addS" style="margin-top:6px">＋ 新增詞性</button>
+    </div>
     <label class="field"><span>音標</span><input type="text" id="e_ph" value="${esc(w.phonetic)}"></label>
     <label class="field"><span>例句</span><input type="text" id="e_ex" value="${esc(w.example)}"></label>
     <div class="muted" style="font-size:13px;margin-bottom:6px">熟練度 ${w.stats?.box||1}/5・答對 ${w.stats?.correct||0}・答錯 ${w.stats?.wrong||0}</div>
@@ -1024,6 +1130,21 @@ function editWord(id, after){
       <button class="btn ghost" id="e_cancel">取消</button>
       <button class="btn primary" id="e_save">儲存</button>
     </div>`);
+  const sBox = m.querySelector("#e_senses");
+  const drawSenses = arr=>{
+    sBox.innerHTML = arr.map(x=>`<div class="row" style="flex-wrap:nowrap">
+      <input type="text" class="s_pos" value="${esc(x.pos)}" placeholder="n." style="width:70px;flex:none">
+      <input type="text" class="s_zh" value="${esc(x.zh)}" placeholder="中文" style="flex:1;min-width:0">
+      <button class="btn sm ghost danger s_del" title="刪除這組">✕</button></div>`).join("");
+  };
+  const readSenses = ()=>[...sBox.children].map(r=>({ pos:r.querySelector(".s_pos").value, zh:r.querySelector(".s_zh").value }));
+  drawSenses(wordSenses(w));
+  m.querySelector("#e_addS").onclick = ()=>{ drawSenses([...readSenses(), {pos:"",zh:""}]); sBox.lastElementChild.querySelector(".s_pos").focus(); };
+  sBox.onclick = e=>{
+    const b = e.target.closest(".s_del"); if(!b) return;
+    b.parentElement.remove();
+    if(!sBox.children.length) drawSenses([{pos:"",zh:""}]);
+  };
   m.querySelector("#e_cancel").onclick = ()=>m.close();
   m.querySelector("#e_known").onclick = ()=>{ Store.setBox([id],5); m.close(); after&&after(); toast("已標為熟"); };
   m.querySelector("#e_weak").onclick  = ()=>{ Store.setBox([id],1); m.close(); after&&after(); toast("已標為不熟"); };
@@ -1035,8 +1156,7 @@ function editWord(id, after){
     await Lookup.run([row]);
     if(row.status==="err"){ toast("查詢失敗："+row.error); }
     else{
-      m.querySelector("#e_pos").value = row.pos || m.querySelector("#e_pos").value;
-      m.querySelector("#e_zh").value  = row.zh  || m.querySelector("#e_zh").value;
+      if(row.zh || row.pos) drawSenses(parseSenses(row.zh, row.pos));
       m.querySelector("#e_ph").value  = row.phonetic || m.querySelector("#e_ph").value;
       m.querySelector("#e_ex").value  = row.example  || m.querySelector("#e_ex").value;
     }
@@ -1044,8 +1164,7 @@ function editWord(id, after){
   };
   m.querySelector("#e_save").onclick = ()=>{
     w.term = m.querySelector("#e_term").value.trim() || w.term;
-    w.pos  = m.querySelector("#e_pos").value.trim();
-    w.zh   = m.querySelector("#e_zh").value.trim();
+    setSenses(w, readSenses());
     w.phonetic = m.querySelector("#e_ph").value.trim();
     w.example  = m.querySelector("#e_ex").value.trim();
     Store.save(); m.close(); after && after(); toast("已儲存");
@@ -1167,7 +1286,21 @@ Views.groups = function(root){
     gg.innerHTML = '<div class="empty" style="grid-column:1/-1"><div class="big">🗂</div>還沒有單字組</div>';
     return;
   }
-  gg.innerHTML = Store.data.groups.map(g=>{
+  /* 找出和這組重疊最多的另一組，重疊超過一半才提示，方便決定要不要刪掉重複的組 */
+  const sets = Store.data.groups.map(g=>new Set(g.wordIds));
+  const overlap = gi=>{
+    let best = null;
+    sets.forEach((st,j)=>{
+      if(j===gi) return;
+      let n = 0; sets[gi].forEach(id=>{ if(st.has(id)) n++; });
+      if(n && (!best || n>best.n)) best = { n, j };
+    });
+    if(!best || best.n < sets[gi].size/2) return "";
+    return '<div class="muted" style="font-size:12px;margin-bottom:6px">⚠ '+
+      (best.n===sets[gi].size ? '全部 '+best.n+' 個字也都' : '有 '+best.n+' 個字也')+
+      '在「'+esc(Store.data.groups[best.j].name)+'」</div>';
+  };
+  gg.innerHTML = Store.data.groups.map((g,gi)=>{
     const ws = Store.groupWords(g.id);
     const m = Store.mastery(ws);
     return `<div class="card" style="margin:0">
@@ -1176,6 +1309,7 @@ Views.groups = function(root){
         <button class="btn sm ghost danger" data-del="${g.id}">🗑</button></h2>
       <div class="muted" style="font-size:13px;margin-bottom:6px">${ws.length} 個單字・熟練 ${m}%</div>
       <div class="bar" style="margin-bottom:12px"><i style="width:${m}%"></i></div>
+      ${overlap(gi)}
       <div class="row">
         <button class="btn sm primary" data-study="${g.id}">背誦</button>
         <button class="btn sm" data-quiz="${g.id}">測驗</button>
@@ -1315,7 +1449,8 @@ Views.read = function(root){
         <div class="rmain">
           <div class="rterm"><span${cov("en")}>${esc(w.term)}</span>
             ${w.phonetic?'<span class="rph"><span'+cov("en")+'>'+esc(w.phonetic)+'</span></span>':''}</div>
-          <div class="rzh"><span${cov("zh")}>${w.pos?'<span class="pos">'+esc(w.pos)+'</span> ':''}${w.zh?esc(w.zh):'<span class="muted">（未填中文）</span>'}</span></div>
+          ${w.zh ? wordSenses(w).map(x=>'<div class="rzh"><span'+cov("zh")+'>'+senseHTML(x)+'</span></div>').join("")
+                 : '<div class="rzh"><span'+cov("zh")+'><span class="muted">（未填中文）</span></span></div>'}
           ${readCfg.ex && w.example?'<div class="rex"><span'+cov("en")+'>'+esc(w.example)+'</span></div>':''}
         </div>
         ${speakBtn(w.term)}
@@ -1363,8 +1498,7 @@ Views.study = function(root){
       `<div class="term">${esc(w.term)} ${speakBtn(w.term)}</div>
        ${w.phonetic?'<div class="ph">'+esc(w.phonetic)+'</div>':''}`;
     const zhSide =
-      `<div class="zh">${esc(w.zh||"（未填中文）")}</div>
-       ${w.pos?'<div class="pos">'+esc(w.pos)+'</div>':''}`;
+      w.zh ? wordSenses(w).map(x=>'<div class="zh">'+senseHTML(x)+'</div>').join("") : '<div class="zh">（未填中文）</div>';
     const tapHint = '<div class="muted" style="font-size:13px">點一下看答案</div>';
     /* 正面只給提示，背面才給完整資訊＋例句 */
     const front = zh2en ? (zhSide + tapHint) : (enSide + tapHint);
@@ -1588,21 +1722,25 @@ function buildRound(picked, offset){
     for(let g=0; g<groupCount && rest.length>=4; g++){
       const items = rest.splice(0, Math.min(5, rest.length));
       if(items.length < 3){ rest.push(...items); break; }
-      qs.push({ type:"match", items });
+      qs.push({ type:"match", items, senses:Object.fromEntries(items.map(w=>[w.id, pickSense(w)])) });
     }
   }
   const others = modes.filter(m=>m!=="match");
   /* 題型依單字在清單中的位置決定，每輪往後推一格，同一個字每輪換題型 */
   rest.forEach(w=>{
     const t = others.length ? others[(picked.indexOf(w)+offset) % others.length] : "choice";
-    qs.push({ type:t, word:w });
+    qs.push({ type:t, word:w, sense:pickSense(w) });
   });
   return shuffle(qs);
 }
 
-function distractors(word, pool, field){
-  const same = pool.filter(w=>w.id!==word.id && w.pos && w.pos===word.pos && w[field]);
-  const any  = pool.filter(w=>w.id!==word.id && w[field]);
+/* avoidZh：看中文選英文時，排除也有這個意思的字（例如 n. 廣告 → advertisement 與 commercial 都對） */
+function distractors(word, pool, field, pos, avoidZh){
+  const p = pos || word.pos;
+  const avoid = new Set(zhItems(avoidZh));
+  const clash = w=>avoid.size && zhItems(w.zh).some(x=>avoid.has(x));
+  const same = pool.filter(w=>w.id!==word.id && p && wordSenses(w).some(x=>x.pos===p) && w[field] && !clash(w));
+  const any  = pool.filter(w=>w.id!==word.id && w[field] && !clash(w));
   const src  = same.length>=3 ? same : any;
   const out = [];
   for(const w of shuffle(src)){
@@ -1649,27 +1787,53 @@ function mark(w, ok){
 }
 
 /* --- 四選一 --- */
+/* 中文干擾選項：從別的單字挑一組意思，盡量挑同詞性的，也避開這個字自己的任何一組意思 */
+function zhDistractors(word, sense, pool){
+  const mine = new Set(zhItems(word.zh));
+  const cands = [];
+  shuffle(pool).forEach(o=>{
+    if(o.id===word.id) return;
+    const os = wordSenses(o).filter(x=>x.zh && !zhItems(x.zh).some(z=>mine.has(z)));
+    if(!os.length) return;
+    const same = os.filter(x=>sense.pos && x.pos===sense.pos);
+    const src = same.length ? same : os;
+    cands.push({ text:src[Math.floor(Math.random()*src.length)].zh, same:same.length>0 });
+  });
+  const sameOnes = cands.filter(c=>c.same);
+  const out = [];
+  for(const c of (sameOnes.length>=3 ? sameOnes : cands)){
+    if(out.length>=3) break;
+    if(!out.includes(c.text)) out.push(c.text);
+  }
+  return out;
+}
 function qChoice(card, q){
-  const w = q.word;
+  const w = q.word, s = q.sense || pickSense(w);
   const en2zh = Math.random() < 0.5;
-  const field = en2zh ? "zh" : "term";
-  const ds = distractors(w, quiz.pool, field);
-  if(ds.length < 3){ /* 選項不足就退化成拼字題 */ return qSpell(card, q); }
-  const opts = shuffle([w, ...ds]);
+  let opts;
+  if(en2zh){
+    const ds = zhDistractors(w, s, quiz.pool);
+    if(ds.length < 3){ /* 選項不足就退化成拼字題 */ return qSpell(card, q); }
+    opts = shuffle([{ text:s.zh, ok:true }, ...ds.map(t=>({ text:t, ok:false }))]);
+  } else {
+    const ds = distractors(w, quiz.pool, "term", s.pos, s.zh);
+    if(ds.length < 3) return qSpell(card, q);
+    opts = shuffle([{ text:w.term, ok:true }, ...ds.map(d=>({ text:d.term, ok:false }))]);
+  }
   card.innerHTML = `
     <h3>${en2zh? "選出正確的中文" : "選出正確的英文"}</h3>
-    <div class="qprompt${en2zh?"":" small"}">${esc(en2zh? w.term : w.zh)} ${en2zh?speakBtn(w.term):""}</div>
-    <div class="opts">${opts.map((o,i)=>'<button class="opt" data-i="'+i+'">'+esc(o[field])+'</button>').join("")}</div>
+    <div class="qprompt${en2zh?"":" small"}">${en2zh ? esc(w.term)+" "+speakBtn(w.term) : senseHTML(s)}</div>
+    <div class="opts">${opts.map((o,i)=>'<button class="opt" data-i="'+i+'">'+esc(o.text)+'</button>').join("")}</div>
     <div class="fb" id="fb"></div>`;
   if(en2zh) autoSay(w.term);
   const btns = [...card.querySelectorAll(".opt")];
   btns.forEach((b,i)=>{
     b.onclick = ()=>{
-      const ok = opts[i].id === w.id;
-      btns.forEach((x,j)=>{ x.disabled=true; if(opts[j].id===w.id) x.classList.add("right"); });
+      const ok = opts[i].ok;
+      btns.forEach((x,j)=>{ x.disabled=true; if(opts[j].ok) x.classList.add("right"); });
       if(!ok) b.classList.add("wrong");
       card.querySelector("#fb").className = "fb "+(ok?"ok":"no");
-      card.querySelector("#fb").textContent = ok? "答對了" : ("正確答案：" + w.term + " " + w.zh);
+      card.querySelector("#fb").textContent = ok? "答對了" : ("正確答案：" + w.term + "　" + sensesText(w));
       mark(w, ok);
       autoSay(w.term);
       setTimeout(next, ok?650:1500);
@@ -1680,14 +1844,14 @@ function qChoice(card, q){
 /* --- 拼字填空 --- */
 /* noHint = 中譯英模式：完全不給字母提示，從零默寫 */
 function qSpell(card, q, listen, noHint){
-  const w = q.word;
+  const w = q.word, s = q.sense || pickSense(w);
   const hint = (quizCfg.hint && !noHint)
     ? w.term.split("").map((c,i)=> (i===0 || !/[a-z]/i.test(c)) ? c : "_").join(" ")
     : "";
   card.innerHTML = `
     <h3>${listen? "聽發音，拼出單字" : noHint? "看中文，寫出完整的英文單字" : "依中文拼出英文單字"}</h3>
     <div class="qprompt small">${ listen ? '<button class="btn" data-speak="'+esc(w.term)+'">🔊 再播一次</button>'
-        : esc(w.zh) + (w.pos?' <span class="pos">'+esc(w.pos)+'</span>':'') }</div>
+        : senseHTML(s) }</div>
     ${hint?'<div class="hintword">'+esc(hint)+'</div>':''}
     <div class="spellwrap">
       <input type="password" id="ans" class="spellbox" name="vocab-answer" autocomplete="off" data-lpignore="true" data-1p-ignore data-bwignore autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="輸入英文">
@@ -1714,7 +1878,7 @@ function qSpell(card, q, listen, noHint){
     inp.disabled = true;
     const fb = card.querySelector("#fb");
     fb.className = "fb "+(ok?"ok":"no");
-    fb.textContent = ok ? "答對了" : ("正確答案："+w.term+"　"+w.zh);
+    fb.textContent = ok ? "答對了" : ("正確答案："+w.term+"　"+sensesText(w));
     mark(w, ok);
     autoSay(w.term);
     setTimeout(()=>{ quiz.answered=false; next(); }, ok?700:1800);
@@ -1747,7 +1911,7 @@ function qListen(card, q){
       if(!ok) b.classList.add("wrong");
       const fb = card.querySelector("#fb");
       fb.className="fb "+(ok?"ok":"no");
-      fb.textContent = ok? "答對了" : ("正確答案："+w.term+"　"+w.zh);
+      fb.textContent = ok? "答對了" : ("正確答案："+w.term+"　"+sensesText(w));
       mark(w, ok);
       setTimeout(next, ok?650:1500);
     };
@@ -1766,7 +1930,7 @@ function qMatch(card, q){
     <div class="fb" id="fb"></div>`;
   const L = card.querySelector("#L"), R = card.querySelector("#R");
   L.innerHTML = shuffle(items).map(w=>'<button class="opt" data-id="'+w.id+'">'+esc(w.term)+'</button>').join("");
-  R.innerHTML = shuffle(items).map(w=>'<button class="opt" data-id="'+w.id+'">'+esc(w.zh)+'</button>').join("");
+  R.innerHTML = shuffle(items).map(w=>'<button class="opt" data-id="'+w.id+'">'+esc((q.senses?.[w.id] || pickSense(w)).zh)+'</button>').join("");
   let sel = null, left = items.length;
   const wrongOnce = new Set();
 
@@ -1809,8 +1973,8 @@ function renderResult(root){
     <p class="hint" style="text-align:center">答對 ${quiz.right}・答錯 ${quiz.wrong}</p>
     ${ missed.length ? `<h3 style="margin-top:18px">錯題 (${missed.length})</h3>
       <ul class="wlist">${missed.map(w=>`<li><div class="wmain">
-        <div class="wterm">${esc(w.term)} ${w.pos?'<span class="pos">'+esc(w.pos)+'</span>':''}</div>
-        <div class="wsub">${esc(w.zh)}</div></div>${speakBtn(w.term)}</li>`).join("")}</ul>
+        <div class="wterm">${esc(w.term)}</div>
+        <div class="wsub">${wordSenses(w).map(x=>'<span class="sense">'+senseHTML(x)+'</span>').join("")}</div></div>${speakBtn(w.term)}</li>`).join("")}</ul>
       <div class="row" style="margin-top:12px">
         <button class="btn sm" id="saveMissed">把錯題存成新的單字組</button>
         <button class="btn sm primary" id="drillMissed">只練錯題</button>
@@ -1878,6 +2042,22 @@ Views.settings = function(root){
       <option value="en2zh">英文（看英文想中文）</option>
       <option value="zh2en">中文（看中文想英文）</option>
     </select></label>
+  </div>
+
+  <div class="card">
+    <h3>資料整理</h3>
+    <p class="hint">每一項都會先列出要改的單字給你確認，可以取消勾選不想改的。</p>
+    <div class="row" style="margin-bottom:6px">
+      <button class="btn" id="dedupe">整理重複單字</button>
+      <button class="btn" id="caseFix">統一改成小寫</button>
+    </div>
+    <p class="hint">整理重複：把「1. Lay off」這種帶編號的字合併回「Lay off」，單字組與學習紀錄會一起搬過去。<br>
+      改小寫：<code>Campaign</code> → <code>campaign</code>；全大寫的縮寫（如 CEO、TV）會保留。</p>
+    <div class="row" style="margin-bottom:6px">
+      <button class="btn" id="fill">${fillJob ? "停止補齊" : "補齊音標／例句"}</button>
+      <span class="muted" style="font-size:13px" id="fillMsg">${fillStatus()}</span>
+    </div>
+    <p class="hint" style="margin:0">用免費英文字典查詢，只填空白的欄位，不會動到中文。片語常常查不到，這是正常的。</p>
   </div>
 
   <div class="card">
@@ -1975,7 +2155,9 @@ Views.settings = function(root){
           (d.groups||[]).forEach(g=>{ if(!Store.data.groups.some(x=>x.name===g.name)) Store.data.groups.push(g); });
         } else {
           Store.data = Object.assign(Store.defaults(), d);
+          Store.data.settings = Object.assign(Store.defaults().settings, Store.data.settings||{});
         }
+        Store.migrate();
         Store.save(); toast("匯入完成"); UI.render();
       }catch(e){ toast("匯入失敗："+e.message); }
     };
@@ -1987,10 +2169,122 @@ Views.settings = function(root){
     Store.data = Store.defaults(); Store.save(); UI.render(); toast("已清空");
   };
 
+  root.querySelector("#dedupe").onclick = ()=>{
+    const items = findDupes();
+    reviewModal("整理重複單字", "勾選的項目會被合併或改名。合併時中文取聯集，單字組和學習紀錄會一起搬過去。",
+      items.map(it=> it.type==="merge"
+        ? '「<b>'+esc(it.dup.term)+'</b>」合併到「'+esc(stripNum(it.keep.term))+'」'
+        : '「<b>'+esc(it.keep.term)+'</b>」改名為「'+esc(it.to)+'」'),
+      "合併", idx=>{
+        const chosen = idx.map(i=>items[i]);
+        chosen.filter(it=>it.type==="merge").forEach(it=>Store.mergeWords(it.keep.id, it.dup.id));
+        chosen.filter(it=>it.type==="rename").forEach(it=>{ if(Store.data.words[it.keep.id]) it.keep.term = it.to; });
+        Store.save(); UI.render(); toast("已整理 "+chosen.length+" 項");
+      });
+  };
+  root.querySelector("#caseFix").onclick = ()=>{
+    const ws = Object.values(Store.data.words).filter(w=>caseFix(w.term)!==w.term)
+      .sort((a,b)=>a.term.localeCompare(b.term));
+    reviewModal("統一改成小寫", "專有名詞（人名、地名、品牌）請取消勾選。",
+      ws.map(w=>esc(w.term)+' → <b>'+esc(caseFix(w.term))+'</b>'),
+      "改成小寫", idx=>{
+        idx.forEach(i=>{ ws[i].term = caseFix(ws[i].term); });
+        Store.save(); UI.render(); toast("已修改 "+idx.length+" 個單字");
+      });
+  };
+  root.querySelector("#fill").onclick = e=>{
+    if(fillJob){ fillJob.stop = true; e.target.textContent = "停止中…"; e.target.disabled = true; return; }
+    const n = Object.values(Store.data.words).filter(w=>!w.phonetic || !w.example).length;
+    if(!n){ toast("所有單字都已經有音標和例句了"); return; }
+    if(!confirm("要查詢 "+n+" 個缺音標或例句的單字嗎？大約需要 "+Math.max(1,Math.ceil(n/60))+" 分鐘，可以隨時停止。")) return;
+    fillDetails();
+    UI.render();
+  };
+
   const th = root.querySelector("#theme");
   th.value = s.theme||"auto";
   th.onchange = ()=>{ s.theme = th.value; Store.save(); applyTheme(); };
 };
+
+/* ---------------- 資料整理工具 ---------------- */
+/* 同一個字（忽略大小寫、開頭編號、多餘空白）出現多次：留沒有編號、較早建立的那個 */
+function findDupes(){
+  const key = t=>Store.norm(stripNum(t)).replace(/\s+/g," ");
+  const hasNum = w=>stripNum(w.term)!==w.term.trim();
+  const byKey = {};
+  Object.values(Store.data.words).forEach(w=>{ (byKey[key(w.term)] = byKey[key(w.term)] || []).push(w); });
+  const items = [];
+  Object.values(byKey).forEach(ws=>{
+    ws.sort((a,b)=>(hasNum(a)-hasNum(b)) || (a.createdAt-b.createdAt));
+    const keep = ws[0];
+    ws.slice(1).forEach(d=>items.push({ type:"merge", keep, dup:d }));
+    if(hasNum(keep)) items.push({ type:"rename", keep, to:stripNum(keep.term) });
+  });
+  return items;
+}
+/* 每個詞都改小寫，但保留全大寫的縮寫（CEO、TV）和單獨的「I」 */
+function caseFix(t){
+  return String(t).split(/(\s+)/).map(x=> (x==="I" || /^[A-Z0-9&.\-]{2,}$/.test(x)) ? x : x.toLowerCase()).join("");
+}
+function reviewModal(title, hint, labels, okText, apply){
+  if(!labels.length){ toast("沒有需要整理的單字"); return; }
+  const m = modal(`<h2>${esc(title)}</h2>
+    <p class="hint">${hint}</p>
+    <div class="row" style="margin-bottom:8px">
+      <label class="chip"><input type="checkbox" id="rv_all" checked style="width:auto;min-height:0"> 全選</label>
+      <span class="muted" style="font-size:13px;margin-left:auto" id="rv_n"></span>
+    </div>
+    <div class="picklist" id="rv_list">${labels.map((l,i)=>'<label><input type="checkbox" data-i="'+i+'" checked><span>'+l+'</span></label>').join("")}</div>
+    <div class="row end" style="margin-top:12px">
+      <button class="btn ghost" id="rv_cancel">取消</button>
+      <button class="btn primary" id="rv_ok">${esc(okText)}</button>
+    </div>`);
+  const boxes = [...m.querySelectorAll("#rv_list input")];
+  const cnt = ()=>{ m.querySelector("#rv_n").textContent = "已選 "+boxes.filter(b=>b.checked).length+" / "+boxes.length; };
+  cnt();
+  m.querySelector("#rv_list").onchange = cnt;
+  m.querySelector("#rv_all").onchange = e=>{ boxes.forEach(b=>b.checked = e.target.checked); cnt(); };
+  m.querySelector("#rv_cancel").onclick = ()=>m.close();
+  m.querySelector("#rv_ok").onclick = ()=>{
+    const idx = boxes.filter(b=>b.checked).map(b=>+b.dataset.i);
+    if(!idx.length){ toast("沒有勾選任何項目"); return; }
+    m.close(); apply(idx);
+  };
+}
+/* 批次補音標／例句：在背景跑，切換分頁也不會中斷 */
+let fillJob = null;
+function fillStatus(){
+  if(fillJob) return "查詢中 "+fillJob.done+" / "+fillJob.total+"・已補 "+fillJob.got+" 個";
+  const ws = Object.values(Store.data.words);
+  return "缺音標 "+ws.filter(w=>!w.phonetic).length+" 個・缺例句 "+ws.filter(w=>!w.example).length+" 個";
+}
+async function fillDetails(){
+  const todo = Object.values(Store.data.words).filter(w=>!w.phonetic || !w.example);
+  const job = fillJob = { total:todo.length, done:0, got:0, stop:false };
+  const tick = ()=>{ const m = document.getElementById("fillMsg"); if(m) m.textContent = fillStatus(); };
+  Lookup.dictDown = 0;
+  let i = 0;
+  const worker = async ()=>{
+    while(i < todo.length && !job.stop){
+      const w = todo[i++];
+      try{
+        const o = await Lookup.dict(w.term);
+        let hit = false;
+        if(!w.phonetic && o.phonetic){ w.phonetic = o.phonetic; hit = true; }
+        if(!w.example && o.example){ w.example = o.example; hit = true; }
+        if(hit) job.got++;
+      }catch(e){ /* 查不到就跳過 */ }
+      job.done++;
+      if(job.done % 10 === 0) Store.save();
+      tick();
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  Store.save();
+  fillJob = null;
+  toast((job.stop ? "已停止，" : "查詢完成，") + "補了 "+job.got+" 個單字");
+  if(UI.route==="settings") UI.render(); else tick();
+}
 
 /* =====================================================================
    啟動
