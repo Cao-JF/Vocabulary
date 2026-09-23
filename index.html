@@ -1779,6 +1779,14 @@ function renderQuiz(root){
 }
 
 function next(){ quiz.i++; UI.render(); }
+/* 作答後不自動跳題，顯示「下一題」按鈕，看完答案再自己按（Enter 也可以） */
+function waitNext(card, before){
+  const last = quiz.i >= quiz.qs.length-1;
+  const b = el('<button class="btn primary" id="nextQ" style="width:100%;margin-top:12px">'+(last?"看結果":"下一題 →")+'</button>');
+  card.appendChild(b);
+  b.onclick = ()=>{ before && before(); next(); };
+  setTimeout(()=>b.focus(), 30);
+}
 function mark(w, ok){
   Store.grade(w, ok);
   ok ? quiz.right++ : quiz.wrong++;
@@ -1836,7 +1844,7 @@ function qChoice(card, q){
       card.querySelector("#fb").textContent = ok? "答對了" : ("正確答案：" + w.term + "　" + sensesText(w));
       mark(w, ok);
       autoSay(w.term);
-      setTimeout(next, ok?650:1500);
+      waitNext(card);
     };
   });
 }
@@ -1881,7 +1889,7 @@ function qSpell(card, q, listen, noHint){
     fb.textContent = ok ? "答對了" : ("正確答案："+w.term+"　"+sensesText(w));
     mark(w, ok);
     autoSay(w.term);
-    setTimeout(()=>{ quiz.answered=false; next(); }, ok?700:1800);
+    waitNext(card, ()=>{ quiz.answered=false; });
   };
   card.querySelector("#ok").onclick = ()=>submit(false);
   card.querySelector("#skip").onclick = ()=>submit(true);
@@ -1913,7 +1921,7 @@ function qListen(card, q){
       fb.className="fb "+(ok?"ok":"no");
       fb.textContent = ok? "答對了" : ("正確答案："+w.term+"　"+sensesText(w));
       mark(w, ok);
-      setTimeout(next, ok?650:1500);
+      waitNext(card);
     };
   });
 }
@@ -1946,7 +1954,7 @@ function qMatch(card, q){
       Store.grade(w, !wrongOnce.has(w.id));
       wrongOnce.has(w.id) ? quiz.wrong++ : quiz.right++;
       autoSay(w.term);
-      if(--left === 0){ Store.save(); setTimeout(next, 500); }
+      if(--left === 0){ Store.save(); waitNext(card); }
     } else {
       b.classList.add("wrong"); other.btn.classList.add("wrong");
       const miss = items.find(x=>x.id===other.id) || w;
