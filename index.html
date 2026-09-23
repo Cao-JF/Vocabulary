@@ -552,7 +552,14 @@ const Lookup = {
    小工具
    ===================================================================== */
 function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
-function el(html){ const d=document.createElement("div"); d.innerHTML=html.trim(); return d.firstElementChild; }
+function el(html){
+  /* 用 <template> 解析：<tr>/<td> 這類表格片段才不會被瀏覽器丟掉。
+     樣板有多個根元素時回傳 fragment，呼叫端 appendChild 後可從父層 querySelector。 */
+  const t = document.createElement("template");
+  t.innerHTML = html.trim();
+  const c = t.content;
+  return c.children.length === 1 ? c.firstElementChild : c;
+}
 function shuffle(a){ const r=a.slice(); for(let i=r.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [r[i],r[j]]=[r[j],r[i]]; } return r; }
 let toastTimer=null;
 function toast(msg){
@@ -1155,7 +1162,7 @@ Views.quiz = function(root){
     root.querySelector("#cnt").textContent = "可出題單字："+poolFor(quizCfg.scope).length;
   };
   root.querySelector("#start").onclick = ()=>{
-    quizCfg.count = +root.querySelector("#count").value;
+    quizCfg.count = +root.querySelector("#count").value || 10;   /* select 值不在清單中時會是空字串 */
     quizCfg.hint = root.querySelector("#hint").checked;
     const p = poolFor(quizCfg.scope);
     if(p.length < 4){ toast("可出題的單字太少（需要至少 4 個有中文的單字）"); return; }
@@ -1172,7 +1179,7 @@ Views.quiz = function(root){
 };
 
 function buildQuiz(pool){
-  const n = Math.min(quizCfg.count, pool.length);
+  const n = Math.max(1, Math.min(quizCfg.count||10, pool.length));
   /* 不熟的優先入選 */
   const sorted = shuffle(pool).sort((a,b)=>(a.stats?.box||1)-(b.stats?.box||1));
   const picked = sorted.slice(0, n);
@@ -1211,6 +1218,12 @@ function distractors(word, pool, field){
 }
 
 function renderQuiz(root){
+  if(!quiz.qs.length && !quiz.right && !quiz.wrong){
+    root.innerHTML = "";
+    root.appendChild(el('<div class="card"><div class="empty"><div class="big">✏️</div>沒有可出題的單字<br><span style="font-size:13px">測驗只會考「有填中文」的單字</span><br><br><button class="btn primary" id="backQ">回測驗設定</button></div></div>'));
+    root.querySelector("#backQ").onclick = ()=>{ quiz=null; UI.render(); };
+    return;
+  }
   const q = quiz.qs[quiz.i];
   if(!q){ renderResult(root); return; }
   const total = quiz.qs.length;
