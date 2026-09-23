@@ -182,6 +182,20 @@ tr.dup{opacity:.5}
 .match .opt.sel{border-color:var(--accent);background:var(--surface-2)}
 .match .opt.done{opacity:.25;pointer-events:none;border-style:dashed}
 .spellbox{font-size:20px;text-align:center;letter-spacing:1px;font-family:ui-monospace,Menlo,monospace}
+/* 拼字框用 password 型別讓手機鍵盤不出選字提示；
+   框裡的圓點與游標設成透明，再把實際輸入的字母疊在上面顯示 */
+.spellwrap{position:relative;margin-top:14px}
+.spellwrap .spellbox{color:transparent;caret-color:transparent}
+.spellwrap .spellbox::placeholder{color:var(--muted)}
+.spellshow{
+  position:absolute;inset:0;pointer-events:none;display:flex;align-items:center;justify-content:center;
+  font-size:20px;letter-spacing:1px;font-family:ui-monospace,Menlo,monospace;white-space:pre;overflow:hidden;
+}
+.spellshow .caret{display:none;width:2px;height:1.2em;background:var(--accent);margin-left:1px;animation:blink 1s steps(1) infinite}
+.spellbox:focus + .spellshow .caret{display:inline-block}
+.spellbox:placeholder-shown + .spellshow{justify-content:flex-start;padding-left:12px}
+.spellbox:placeholder-shown + .spellshow .caret{display:none}
+@keyframes blink{50%{opacity:0}}
 .hintword{text-align:center;font-family:ui-monospace,Menlo,monospace;letter-spacing:5px;font-size:20px;color:var(--muted)}
 .fb{text-align:center;font-weight:600;min-height:26px;margin-top:10px}
 .fb.ok{color:var(--ok)} .fb.no{color:var(--bad)}
@@ -1583,13 +1597,21 @@ function qSpell(card, q, listen, noHint){
     <div class="qprompt small">${ listen ? '<button class="btn" data-speak="'+esc(w.term)+'">🔊 再播一次</button>'
         : esc(w.zh) + (w.pos?' <span class="pos">'+esc(w.pos)+'</span>':'') }</div>
     ${hint?'<div class="hintword">'+esc(hint)+'</div>':''}
-    <input type="text" id="ans" class="spellbox" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="輸入英文" style="margin-top:14px">
+    <div class="spellwrap">
+      <input type="password" id="ans" class="spellbox" name="vocab-answer" autocomplete="off" data-lpignore="true" data-1p-ignore data-bwignore autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="輸入英文">
+      <div class="spellshow"><span></span><i class="caret"></i></div>
+    </div>
     <div class="row" style="margin-top:12px">
       <button class="btn ghost" id="skip" style="flex:1">不會，看答案</button>
       <button class="btn primary" id="ok" style="flex:1">送出</button>
     </div>
     <div class="fb" id="fb"></div>`;
   const inp = card.querySelector("#ans");
+  const shown = card.querySelector(".spellshow span");
+  /* 游標固定在最後，避免在中間插字時畫面和實際內容對不上 */
+  const sync = ()=>{ shown.textContent = inp.value; const n=inp.value.length; inp.setSelectionRange(n,n); };
+  inp.oninput = sync;
+  inp.onfocus = inp.onclick = inp.onkeyup = sync;
   setTimeout(()=>inp.focus(), 60);
   if(listen) Speech.say(w.term);
 
