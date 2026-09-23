@@ -186,6 +186,24 @@ tr.dup{opacity:.5}
 .fb{text-align:center;font-weight:600;min-height:26px;margin-top:10px}
 .fb.ok{color:var(--ok)} .fb.no{color:var(--bad)}
 .score{font-size:46px;font-weight:700;text-align:center}
+
+/* ---------- 專心看 ---------- */
+.rlist{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.rlist li{
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:14px 16px;display:flex;gap:10px;align-items:flex-start;
+}
+.rlist .rmain{flex:1;min-width:0}
+.rlist .rterm{font-size:22px;font-weight:700;word-break:break-word;display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.rlist .rph{color:var(--muted);font-size:14px;font-family:ui-monospace,Menlo,monospace;font-weight:400}
+.rlist .rzh{font-size:17px;margin-top:4px}
+.rlist .rex{color:var(--muted);font-size:14px;font-style:italic;margin-top:6px}
+.rlist .cover{
+  display:inline-block;min-width:6em;border-radius:6px;background:var(--surface-2);
+  color:transparent;user-select:none;cursor:pointer;
+}
+.rlist .cover *{visibility:hidden}
+.rnum{color:var(--muted);font-size:12px;min-width:2.2em;padding-top:8px;text-align:right}
 </style>
 </head>
 <body>
@@ -650,6 +668,7 @@ function parseImport(text){
 const TABS = [
   { id:"import", ic:"⬇", label:"匯入" },
   { id:"words",  ic:"📖", label:"單字庫" },
+  { id:"read",   ic:"👀", label:"專心看" },
   { id:"groups", ic:"🗂", label:"組別" },
   { id:"study",  ic:"🃏", label:"背誦" },
   { id:"quiz",   ic:"✏️", label:"測驗" },
@@ -843,7 +862,10 @@ Views.words = function(root){
   const all = Store.focusWords();
   root.appendChild(el(`
   <div class="card">
-    <h1>單字庫</h1>
+    <div class="row" style="margin-bottom:6px">
+      <h1 style="flex:1">單字庫</h1>
+      <button class="btn sm" id="toRead" title="不顯示勾選與編輯，只專心看單字">👀 專心看</button>
+    </div>
     <div class="row" style="margin-bottom:10px">
       <input type="text" id="q" placeholder="搜尋單字或中文…" value="${esc(wordFilter.q)}" style="flex:2;min-width:150px">
       <select id="sort" style="flex:1;min-width:120px">
@@ -863,6 +885,7 @@ Views.words = function(root){
   </div>`));
   root.querySelector("#sort").value = wordFilter.sort;
   root.querySelector("#only").value = wordFilter.only;
+  root.querySelector("#toRead").onclick = ()=>UI.go("read");
 
   const onChange = ()=>{
     wordFilter.q = root.querySelector("#q").value;
@@ -1138,6 +1161,7 @@ Views.groups = function(root){
         <button class="btn sm primary" data-study="${g.id}">背誦</button>
         <button class="btn sm" data-quiz="${g.id}">測驗</button>
         <button class="btn sm ghost" data-view="${g.id}">看單字</button>
+        <button class="btn sm ghost" data-read="${g.id}">專心看</button>
         <button class="btn sm" data-bulk="${g.id}" title="貼上多行單字，從單字庫撈進這組">批次加入</button>
         <button class="btn sm ghost" data-reset="${g.id}" title="把這組的熟練度歸零">重置</button>
       </div>
@@ -1145,7 +1169,7 @@ Views.groups = function(root){
   }).join("");
 
   gg.onclick = e=>{
-    const b = e.target.closest("button[data-ren],button[data-del],button[data-study],button[data-quiz],button[data-view],button[data-reset],button[data-bulk]");
+    const b = e.target.closest("button[data-ren],button[data-del],button[data-study],button[data-quiz],button[data-view],button[data-read],button[data-reset],button[data-bulk]");
     if(!b) return;
     const d = b.dataset;
     if(d.bulk){ bulkAddToGroup(d.bulk); return; }
@@ -1165,11 +1189,120 @@ Views.groups = function(root){
       Store.data.groups = Store.data.groups.filter(x=>x.id!==d.del);
       if(Store.data.focusGroup===d.del) Store.data.focusGroup="all";
       Store.save(); UI.render();
-    } else if(d.study||d.quiz||d.view){
-      Store.data.focusGroup = d.study||d.quiz||d.view; Store.save();
-      UI.go(d.study? "study" : d.quiz? "quiz" : "words");
+    } else if(d.study||d.quiz||d.view||d.read){
+      Store.data.focusGroup = d.study||d.quiz||d.view||d.read; Store.save();
+      UI.go(d.study? "study" : d.quiz? "quiz" : d.read? "read" : "words");
     }
   };
+};
+
+/* ---------------- 專心看 ----------------
+   純瀏覽目前範圍的單字：沒有勾選框、沒有編輯按鈕，
+   可以遮住中文或英文，點一下單字再翻開來自我檢查。 */
+let readCfg = { sort:"az", only:"", hide:"", ex:true };
+let readOrder = null;   /* 隨機排序時記住順序，避免每次重畫都洗牌 */
+const revealed = new Set();
+Views.read = function(root){
+  const all = Store.focusWords();
+  const gname = Store.group(Store.data.focusGroup)?.name || "全部單字";
+  root.appendChild(el(`
+  <div class="card" style="margin-bottom:14px">
+    <div class="row" style="margin-bottom:4px">
+      <h1 style="flex:1">專心看單字</h1>
+      <button class="btn sm ghost" id="r_back">回單字庫</button>
+    </div>
+    <p class="hint">範圍：${esc(gname)}（${all.length} 個）・可從上方選單切換單字組</p>
+    <div class="row" style="margin-bottom:10px">
+      <select id="r_sort" style="flex:1;min-width:120px">
+        <option value="az">字母順序</option>
+        <option value="new">最新加入</option>
+        <option value="weak">最不熟優先</option>
+        <option value="rand">隨機</option>
+      </select>
+      <select id="r_only" style="flex:1;min-width:110px">
+        <option value="">全部</option>
+        <option value="weak">只看不熟</option>
+        <option value="known">只看已熟</option>
+      </select>
+    </div>
+    <div class="row" id="r_hide">
+      <span class="muted" style="font-size:13px">遮住：</span>
+      <button class="chip" data-h="">不遮</button>
+      <button class="chip" data-h="zh">中文</button>
+      <button class="chip" data-h="en">英文</button>
+      <span style="flex:1"></span>
+      <button class="chip" id="r_ex">例句</button>
+      <button class="chip" id="r_revAll" style="display:none">全部翻開</button>
+    </div>
+  </div>
+  <ul class="rlist" id="r_list"></ul>`));
+
+  const $ = s=>root.querySelector(s);
+  $("#r_sort").value = readCfg.sort;
+  $("#r_only").value = readCfg.only;
+  $("#r_back").onclick = ()=>UI.go("words");
+  $("#r_sort").onchange = e=>{ readCfg.sort = e.target.value; readOrder = null; draw(); };
+  $("#r_only").onchange = e=>{ readCfg.only = e.target.value; draw(); };
+  $("#r_hide").onclick = e=>{
+    const b = e.target.closest("[data-h]"); if(!b) return;
+    readCfg.hide = b.dataset.h; revealed.clear(); draw();
+  };
+  $("#r_ex").onclick = ()=>{ readCfg.ex = !readCfg.ex; draw(); };
+  $("#r_revAll").onclick = ()=>{
+    const allOpen = list().every(w=>revealed.has(w.id));
+    list().forEach(w=> allOpen ? revealed.delete(w.id) : revealed.add(w.id));
+    draw();
+  };
+  $("#r_list").onclick = e=>{
+    if(e.target.closest("[data-speak]")) return;
+    const li = e.target.closest("li[data-id]");
+    if(!li || !readCfg.hide) return;
+    const id = li.dataset.id;
+    revealed.has(id) ? revealed.delete(id) : revealed.add(id);
+    draw();
+  };
+  draw();
+
+  function list(){
+    let ws = all.slice();
+    if(readCfg.only==="weak")  ws = ws.filter(w=>(w.stats?.box||1)<=2);
+    if(readCfg.only==="known") ws = ws.filter(w=>(w.stats?.box||1)>=4);
+    if(readCfg.sort==="az") ws.sort((a,b)=>a.term.localeCompare(b.term));
+    else if(readCfg.sort==="new") ws.sort((a,b)=>b.createdAt-a.createdAt);
+    else if(readCfg.sort==="weak") ws.sort((a,b)=>(a.stats?.box||1)-(b.stats?.box||1) || a.term.localeCompare(b.term));
+    else{
+      if(!readOrder) readOrder = shuffle(all.map(w=>w.id));
+      const pos = new Map(readOrder.map((id,i)=>[id,i]));
+      ws.sort((a,b)=>(pos.get(a.id)??1e9)-(pos.get(b.id)??1e9));
+    }
+    return ws;
+  }
+  function draw(){
+    root.querySelectorAll("#r_hide [data-h]").forEach(b=>b.classList.toggle("on", b.dataset.h===readCfg.hide));
+    $("#r_ex").classList.toggle("on", readCfg.ex);
+    $("#r_revAll").style.display = readCfg.hide ? "" : "none";
+    const ws = list();
+    const ul = $("#r_list");
+    if(!ws.length){
+      ul.innerHTML = '<li style="display:block"><div class="empty"><div class="big">👀</div>'+
+        (all.length? "沒有符合的單字" : "這個範圍還沒有單字，先去「匯入」加一些吧")+'</div></li>';
+      return;
+    }
+    ul.innerHTML = ws.map((w,i)=>{
+      const open = revealed.has(w.id);
+      const cov = side => readCfg.hide===side && !open ? ' class="cover" title="點一下翻開"' : '';
+      return `<li data-id="${w.id}">
+        <span class="rnum">${i+1}</span>
+        <div class="rmain">
+          <div class="rterm"><span${cov("en")}>${esc(w.term)}</span>
+            ${w.phonetic?'<span class="rph"><span'+cov("en")+'>'+esc(w.phonetic)+'</span></span>':''}</div>
+          <div class="rzh"><span${cov("zh")}>${w.pos?'<span class="pos">'+esc(w.pos)+'</span> ':''}${w.zh?esc(w.zh):'<span class="muted">（未填中文）</span>'}</span></div>
+          ${readCfg.ex && w.example?'<div class="rex"><span'+cov("en")+'>'+esc(w.example)+'</span></div>':''}
+        </div>
+        ${speakBtn(w.term)}
+      </li>`;
+    }).join("");
+  }
 };
 
 /* ---------------- 背誦 Flashcard ---------------- */
@@ -1760,6 +1893,7 @@ document.getElementById("tabbar").addEventListener("click", e=>{
 document.getElementById("focusSel").addEventListener("change", e=>{
   Store.data.focusGroup = e.target.value; Store.save();
   study = null; quiz = null; selected.clear();
+  readOrder = null; revealed.clear();
   UI.render();
 });
 document.getElementById("soundBtn").addEventListener("click", ()=>{
