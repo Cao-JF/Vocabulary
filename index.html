@@ -691,6 +691,8 @@ const Views = {};
 
 /* ---------------- 匯入 ---------------- */
 let importRows = [];
+/* 從「批次加入」帶過來的待建立單字，以及要順便加進去的組 */
+let pendingImport = "", pendingImportGroup = "";
 Views.import = function(root){
   root.appendChild(el(`
   <div class="card">
@@ -705,6 +707,12 @@ Views.import = function(root){
     </div>
   </div>
   <div id="previewWrap"></div>`));
+
+  if(pendingImport){
+    root.querySelector("#imp").value = pendingImport;
+    pendingImport = "";
+    toast("已帶入單字庫裡沒有的單字，按下方按鈕查詢後即可建立");
+  }
 
   root.querySelector("#modeTag").textContent =
     Lookup.usingLLM() ? "查詢來源：AI（"+Store.data.settings.llmProvider+"）" : "查詢來源：免費字典 API";
@@ -788,6 +796,7 @@ Views.import = function(root){
     gsel.innerHTML = '<option value="">（不加入）</option>' +
       Store.data.groups.map(g=>'<option value="'+g.id+'">'+esc(g.name)+'</option>').join("") +
       '<option value="__new">＋ 新建單字組…</option>';
+    if(pendingImportGroup && Store.group(pendingImportGroup)) gsel.value = pendingImportGroup;
     gsel.onchange = ()=>{ gname.style.display = gsel.value==="__new" ? "" : "none"; };
 
     const retry = card.querySelector("#retryBtn");
@@ -819,6 +828,7 @@ Views.import = function(root){
       if(gid){ Store.addToGroup(gid, ids); Store.data.focusGroup = gid; }
       Store.save();
       importRows = [];
+      pendingImportGroup = "";
       document.querySelector("#imp") && (document.querySelector("#imp").value="");
       toast("已匯入 "+picks.length+" 個單字");
       UI.go("words");
@@ -999,6 +1009,66 @@ function editWord(id, after){
     Store.save(); m.close(); after && after(); toast("已儲存");
   };
 }
+/* 貼上多行單字，從單字庫比對後加進指定的組。
+   解析沿用 parseImport，所以逗號/直線/Tab 格式與匯入頁一致，同一份清單可直接重貼。 */
+function bulkAddToGroup(gid){
+  const g = Store.group(gid); if(!g) return;
+  const m = modal(`<h2>批次加入「${esc(g.name)}」</h2>
+    <p class="hint">一行一個單字，只會從<b>單字庫既有的單字</b>裡撈。<br>
+      格式和匯入頁一樣，貼 <code>apple, 蘋果</code> 這種也可以，只會看第一欄。</p>
+    <textarea id="b_txt" rows="8" placeholder="apple&#10;determine&#10;resilient"></textarea>
+    <div id="b_stat" class="muted" style="font-size:13px;margin:10px 0"></div>
+    <div id="b_missWrap" style="display:none">
+      <h3 style="margin-top:4px">單字庫裡沒有的（<span id="b_missN"></span>）</h3>
+      <div id="b_miss" style="font-size:13px;max-height:120px;overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:10px"></div>
+      <button class="btn sm" id="b_toImport">把這些帶去匯入頁建立</button>
+    </div>
+    <div class="row end" style="margin-top:14px">
+      <button class="btn ghost" id="b_cancel">取消</button>
+      <button class="btn primary" id="b_ok" disabled>加入</button>
+    </div>`);
+
+  const txt = m.querySelector("#b_txt");
+  let found=[], already=[], miss=[];
+
+  const scan = ()=>{
+    const terms = parseImport(txt.value).map(r=>r.term);
+    found=[]; already=[]; miss=[];
+    terms.forEach(t=>{
+      const w = Store.findByTerm(t);
+      if(!w) miss.push(t);
+      else if(g.wordIds.includes(w.id)) already.push(w);
+      else found.push(w);
+    });
+    m.querySelector("#b_stat").innerHTML =
+      terms.length
+        ? `共 ${terms.length} 行・<b style="color:var(--ok)">可加入 ${found.length}</b>・已在組內 ${already.length}・查無 ${miss.length}`
+        : "";
+    m.querySelector("#b_ok").disabled = !found.length;
+    m.querySelector("#b_ok").textContent = found.length? "加入 "+found.length+" 個單字" : "加入";
+    const mw = m.querySelector("#b_missWrap");
+    mw.style.display = miss.length? "block" : "none";
+    if(miss.length){
+      m.querySelector("#b_missN").textContent = miss.length;
+      m.querySelector("#b_miss").textContent = miss.join("、");
+    }
+  };
+  txt.oninput = scan;
+  setTimeout(()=>txt.focus(), 60);
+
+  m.querySelector("#b_cancel").onclick = ()=>m.close();
+  m.querySelector("#b_toImport").onclick = ()=>{
+    pendingImport = miss.join(String.fromCharCode(10));
+    pendingImportGroup = gid;
+    m.close(); UI.go("import");
+  };
+  m.querySelector("#b_ok").onclick = ()=>{
+    const n = Store.addToGroup(gid, found.map(w=>w.id));
+    m.close(); UI.render();
+    toast("已加入 "+n+" 個單字"+(miss.length? "（"+miss.length+" 個單字庫裡沒有）":""));
+  };
+}
+
 function pickGroup(cb){
   const m = modal(`<h2>選擇單字組</h2>
     <label class="field"><span>加入現有組</span><select id="p_sel">
@@ -1068,15 +1138,17 @@ Views.groups = function(root){
         <button class="btn sm primary" data-study="${g.id}">背誦</button>
         <button class="btn sm" data-quiz="${g.id}">測驗</button>
         <button class="btn sm ghost" data-view="${g.id}">看單字</button>
+        <button class="btn sm" data-bulk="${g.id}" title="貼上多行單字，從單字庫撈進這組">批次加入</button>
         <button class="btn sm ghost" data-reset="${g.id}" title="把這組的熟練度歸零">重置</button>
       </div>
     </div>`;
   }).join("");
 
   gg.onclick = e=>{
-    const b = e.target.closest("button[data-ren],button[data-del],button[data-study],button[data-quiz],button[data-view],button[data-reset]");
+    const b = e.target.closest("button[data-ren],button[data-del],button[data-study],button[data-quiz],button[data-view],button[data-reset],button[data-bulk]");
     if(!b) return;
     const d = b.dataset;
+    if(d.bulk){ bulkAddToGroup(d.bulk); return; }
     if(d.reset){
       const g = Store.group(d.reset);
       if(!confirm('把「'+g.name+'」裡 '+g.wordIds.length+' 個單字的熟練度歸零？單字不會被刪除。')) return;
@@ -1200,6 +1272,7 @@ Views.study = function(root){
 let quiz = null;
 const MODES = [
   { id:"match",  label:"中英配對" },
+  { id:"recall", label:"中譯英" },
   { id:"spell",  label:"拼字填空" },
   { id:"choice", label:"四選一" },
   { id:"listen", label:"聽力測驗" }
@@ -1225,7 +1298,8 @@ Views.quiz = function(root){
     <label class="field"><span>題數</span><select id="count">
       <option>5</option><option>10</option><option>20</option><option>30</option><option>50</option>
     </select></label>
-    <label class="row" style="margin-bottom:14px"><input type="checkbox" id="hint" style="width:auto;min-height:0"${quizCfg.hint?" checked":""}> <span style="font-size:14px">拼字題顯示字母提示</span></label>
+    <label class="row" style="margin-bottom:14px"><input type="checkbox" id="hint" style="width:auto;min-height:0"${quizCfg.hint?" checked":""}> <span style="font-size:14px">拼字填空顯示字母提示（a _ _ l e）</span></label>
+    <p class="hint" style="margin:-8px 0 12px">「中譯英」不受這個選項影響，一律不給提示。</p>
     <div class="muted" style="font-size:13px;margin-bottom:10px" id="cnt">可出題單字：${pool.length}</div>
     <button class="btn primary" id="start" style="width:100%">開始測驗</button>
   </div>`));
@@ -1323,7 +1397,8 @@ function renderQuiz(root){
 
   const card = el('<div class="card"></div>');
   root.appendChild(card);
-  ({ match:qMatch, spell:qSpell, choice:qChoice, listen:qListen })[q.type](card, q);
+  ({ match:qMatch, spell:qSpell, choice:qChoice, listen:qListen,
+     recall:(c,x)=>qSpell(c, x, false, true) })[q.type](card, q);
 }
 
 function next(){ quiz.i++; UI.render(); }
@@ -1364,13 +1439,14 @@ function qChoice(card, q){
 }
 
 /* --- 拼字填空 --- */
-function qSpell(card, q, listen){
+/* noHint = 中譯英模式：完全不給字母提示，從零默寫 */
+function qSpell(card, q, listen, noHint){
   const w = q.word;
-  const hint = quizCfg.hint
+  const hint = (quizCfg.hint && !noHint)
     ? w.term.split("").map((c,i)=> (i===0 || !/[a-z]/i.test(c)) ? c : "_").join(" ")
     : "";
   card.innerHTML = `
-    <h3>${listen? "聽發音，拼出單字" : "依中文拼出英文單字"}</h3>
+    <h3>${listen? "聽發音，拼出單字" : noHint? "看中文，寫出完整的英文單字" : "依中文拼出英文單字"}</h3>
     <div class="qprompt small">${ listen ? '<button class="btn" data-speak="'+esc(w.term)+'">🔊 再播一次</button>'
         : esc(w.zh) + (w.pos?' <span class="pos">'+esc(w.pos)+'</span>':'') }</div>
     ${hint?'<div class="hintword">'+esc(hint)+'</div>':''}
