@@ -200,6 +200,11 @@ tr.dup{opacity:.5}
 .fb{text-align:center;font-weight:600;min-height:26px;margin-top:10px}
 .fb.ok{color:var(--ok)} .fb.no{color:var(--bad)}
 .score{font-size:46px;font-weight:700;text-align:center}
+.picklist{max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:10px;background:var(--bg)}
+.picklist label{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border);cursor:pointer}
+.picklist label:last-child{border-bottom:0}
+.picklist input{width:auto;min-height:0;flex:none}
+.picklist .pz{color:var(--muted);font-size:13px;margin-left:auto;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:50%}
 
 /* ---------- 專心看 ---------- */
 .rlist{list-style:none;margin:0;padding:0;display:grid;gap:10px}
@@ -1424,7 +1429,15 @@ const MODES = [
   { id:"choice", label:"四選一" },
   { id:"listen", label:"聽力測驗" }
 ];
-let quizCfg = { modes:["choice","spell"], count:10, scope:"focus", hint:true };
+let quizCfg = { modes:["choice","spell"], count:10, scope:"focus", hint:true, rounds:2 };
+let pickQ = "";
+/* 自選單字：每個單字組各記一份勾選清單，存在 localStorage，下次打開還在 */
+function quizPicks(){
+  if(!Store.data.quizPicks) Store.data.quizPicks = {};
+  const k = Store.data.focusGroup || "all";
+  if(!Store.data.quizPicks[k]) Store.data.quizPicks[k] = [];
+  return Store.data.quizPicks[k];
+}
 
 Views.quiz = function(root){
   if(quiz){ renderQuiz(root); return; }
@@ -1441,9 +1454,23 @@ Views.quiz = function(root){
       <option value="focus">目前選取的範圍</option>
       <option value="weak">只考不熟的（熟練度 ≤2）</option>
       <option value="all">全部單字</option>
+      <option value="pick">自選單字，重複練習</option>
     </select></label>
-    <label class="field"><span>題數</span><select id="count">
+    <div id="pickWrap" style="display:none;margin-bottom:12px">
+      <input type="text" id="pickQ" placeholder="搜尋單字或中文…" style="margin-bottom:8px">
+      <div class="row" style="margin-bottom:8px">
+        <button class="chip" id="pickAll">全選</button>
+        <button class="chip" id="pickNone">全不選</button>
+        <button class="chip" id="pickWeak">加選不熟的</button>
+        <span class="muted" style="font-size:13px;margin-left:auto" id="pickN"></span>
+      </div>
+      <div class="picklist" id="pickList"></div>
+    </div>
+    <label class="field" id="countWrap"><span>題數</span><select id="count">
       <option>5</option><option>10</option><option>20</option><option>30</option><option>50</option>
+    </select></label>
+    <label class="field" id="roundsWrap" style="display:none"><span>每個單字練幾輪（每輪換題型、打亂順序）</span><select id="rounds">
+      <option>1</option><option>2</option><option>3</option><option>5</option>
     </select></label>
     <label class="row" style="margin-bottom:14px"><input type="checkbox" id="hint" style="width:auto;min-height:0"${quizCfg.hint?" checked":""}> <span style="font-size:14px">拼字填空顯示字母提示（a _ _ l e）</span></label>
     <p class="hint" style="margin:-8px 0 12px">「中譯英」不受這個選項影響，一律不給提示。</p>
@@ -1452,6 +1479,8 @@ Views.quiz = function(root){
   </div>`));
   root.querySelector("#scope").value = quizCfg.scope;
   root.querySelector("#count").value = String(quizCfg.count);
+  root.querySelector("#rounds").value = String(quizCfg.rounds);
+  const $ = s=>root.querySelector(s);
 
   root.querySelector("#modes").onclick = e=>{
     const b = e.target.closest("[data-m]"); if(!b) return;
@@ -1461,16 +1490,70 @@ Views.quiz = function(root){
     else quizCfg.modes.push(id);
     b.classList.toggle("on");
   };
-  root.querySelector("#scope").onchange = e=>{
-    quizCfg.scope = e.target.value;
-    root.querySelector("#cnt").textContent = "可出題單字："+poolFor(quizCfg.scope).length;
+  root.querySelector("#scope").onchange = e=>{ quizCfg.scope = e.target.value; refresh(); };
+  $("#rounds").onchange = e=>{ quizCfg.rounds = +e.target.value || 1; refresh(); };
+
+  /* ---- 自選單字清單 ---- */
+  const cands = poolFor("focus").sort((a,b)=>a.term.localeCompare(b.term));
+  const picks = quizPicks();
+  /* 清掉已刪除或已不在這個範圍的單字 */
+  const candIds = new Set(cands.map(w=>w.id));
+  for(let i=picks.length-1;i>=0;i--) if(!candIds.has(picks[i])) picks.splice(i,1);
+  const setPicks = ids=>{ picks.length=0; picks.push(...ids); Store.save(); drawPick(); };
+  const shownCands = ()=>{
+    const q = Store.norm(pickQ);
+    return q ? cands.filter(w=>Store.norm(w.term).includes(q) || w.zh.includes(pickQ.trim())) : cands;
   };
+  function drawPick(){
+    const on = new Set(picks);
+    const ws = shownCands();
+    $("#pickList").innerHTML = ws.length ? ws.map(w=>`<label>
+        <input type="checkbox" data-pid="${w.id}"${on.has(w.id)?" checked":""}>
+        <span class="boxdot b${w.stats?.box||1}"></span>
+        <b>${esc(w.term)}</b><span class="pz">${esc(w.zh)}</span></label>`).join("")
+      : '<div class="empty" style="padding:20px">'+(cands.length?"沒有符合的單字":"這個範圍沒有可出題的單字")+'</div>';
+    refresh();
+  }
+  $("#pickQ").value = pickQ;
+  $("#pickQ").oninput = e=>{ pickQ = e.target.value; drawPick(); };
+  $("#pickList").onchange = e=>{
+    const id = e.target.dataset.pid; if(!id) return;
+    const i = picks.indexOf(id);
+    if(e.target.checked && i<0) picks.push(id);
+    if(!e.target.checked && i>=0) picks.splice(i,1);
+    Store.save(); refresh();
+  };
+  /* 全選／全不選只作用在目前搜尋到的單字 */
+  $("#pickAll").onclick  = ()=>setPicks([...new Set([...picks, ...shownCands().map(w=>w.id)])]);
+  $("#pickNone").onclick = ()=>{ const hide=new Set(shownCands().map(w=>w.id)); setPicks(picks.filter(id=>!hide.has(id))); };
+  $("#pickWeak").onclick = ()=>setPicks([...new Set([...picks, ...cands.filter(w=>(w.stats?.box||1)<=2).map(w=>w.id)])]);
+
+  function refresh(){
+    const pick = quizCfg.scope==="pick";
+    $("#pickWrap").style.display   = pick ? "" : "none";
+    $("#roundsWrap").style.display = pick ? "" : "none";
+    $("#countWrap").style.display  = pick ? "none" : "";
+    $("#pickN").textContent = "已選 "+picks.length+" 個";
+    $("#cnt").textContent = pick
+      ? "已選 "+picks.length+" 個單字 × "+quizCfg.rounds+" 輪"
+      : "可出題單字："+poolFor(quizCfg.scope).length;
+  }
+  drawPick();
+
   root.querySelector("#start").onclick = ()=>{
     quizCfg.count = +root.querySelector("#count").value || 10;   /* select 值不在清單中時會是空字串 */
     quizCfg.hint = root.querySelector("#hint").checked;
-    const p = poolFor(quizCfg.scope);
-    if(p.length < 4){ toast("可出題的單字太少（需要至少 4 個有中文的單字）"); return; }
-    quiz = buildQuiz(p);
+    if(quizCfg.scope==="pick"){
+      const ws = picks.map(id=>Store.data.words[id]).filter(Boolean);
+      if(!ws.length){ toast("請先勾選要練習的單字"); return; }
+      /* 選項（干擾項）從整個範圍抽，所以選少少幾個字也能出四選一 */
+      if(cands.length < 4){ toast("這個範圍可出題的單字太少（需要至少 4 個有中文的單字當選項）"); return; }
+      quiz = buildQuiz(cands, ws, quizCfg.rounds);
+    } else {
+      const p = poolFor(quizCfg.scope);
+      if(p.length < 4){ toast("可出題的單字太少（需要至少 4 個有中文的單字）"); return; }
+      quiz = buildQuiz(p);
+    }
     Speech.warm();
     UI.render();
   };
@@ -1482,11 +1565,19 @@ Views.quiz = function(root){
   }
 };
 
-function buildQuiz(pool){
-  const n = Math.max(1, Math.min(quizCfg.count||10, pool.length));
-  /* 不熟的優先入選 */
-  const sorted = shuffle(pool).sort((a,b)=>(a.stats?.box||1)-(b.stats?.box||1));
-  const picked = sorted.slice(0, n);
+/* words：指定要考的單字（自選模式）；沒給就從 pool 挑，不熟的優先。
+   rounds：每個單字考幾輪。每輪各自打亂、題型輪替，同一個字不會連續出現在同一輪裡 */
+function buildQuiz(pool, words, rounds){
+  let picked = words;
+  if(!picked){
+    const n = Math.max(1, Math.min(quizCfg.count||10, pool.length));
+    picked = shuffle(pool).sort((a,b)=>(a.stats?.box||1)-(b.stats?.box||1)).slice(0, n);
+  }
+  const qs = [];
+  for(let r=0; r<(rounds||1); r++) qs.push(...buildRound(picked, r));
+  return { qs, i:0, right:0, wrong:0, missed:[], pool, words:picked, rounds:rounds||1, answered:false };
+}
+function buildRound(picked, offset){
   const qs = [];
   const modes = quizCfg.modes.slice();
   const rest = shuffle(picked);
@@ -1501,11 +1592,12 @@ function buildQuiz(pool){
     }
   }
   const others = modes.filter(m=>m!=="match");
-  rest.forEach((w,i)=>{
-    const t = others.length ? others[i % others.length] : "choice";
+  /* 題型依單字在清單中的位置決定，每輪往後推一格，同一個字每輪換題型 */
+  rest.forEach(w=>{
+    const t = others.length ? others[(picked.indexOf(w)+offset) % others.length] : "choice";
     qs.push({ type:t, word:w });
   });
-  return { qs:shuffle(qs), i:0, right:0, wrong:0, missed:[], pool, answered:false };
+  return shuffle(qs);
 }
 
 function distractors(word, pool, field){
@@ -1719,9 +1811,13 @@ function renderResult(root){
       <ul class="wlist">${missed.map(w=>`<li><div class="wmain">
         <div class="wterm">${esc(w.term)} ${w.pos?'<span class="pos">'+esc(w.pos)+'</span>':''}</div>
         <div class="wsub">${esc(w.zh)}</div></div>${speakBtn(w.term)}</li>`).join("")}</ul>
-      <button class="btn sm" id="saveMissed" style="margin-top:12px">把錯題存成新的單字組</button>` : '<p class="hint" style="text-align:center">全部答對，太強了 🎉</p>' }
+      <div class="row" style="margin-top:12px">
+        <button class="btn sm" id="saveMissed">把錯題存成新的單字組</button>
+        <button class="btn sm primary" id="drillMissed">只練錯題</button>
+      </div>` : '<p class="hint" style="text-align:center">全部答對，太強了 🎉</p>' }
     <div class="row end" style="margin-top:18px">
-      <button class="btn ghost" id="again">再測一次</button>
+      <button class="btn ghost" id="again">回設定</button>
+      <button class="btn" id="redo">同樣的單字再練一次</button>
       <button class="btn primary" id="done">完成</button>
     </div>
   </div>`));
@@ -1732,6 +1828,11 @@ function renderResult(root){
     toast('已建立單字組「'+g.name+'」');
     sm.disabled = true;
   };
+  const words = quiz.words, pool = quiz.pool, rounds = quiz.rounds;
+  const restart = ws=>{ quiz = buildQuiz(pool, ws, rounds); UI.render(); };
+  const dm = root.querySelector("#drillMissed");
+  if(dm) dm.onclick = ()=>restart(missed.slice());
+  root.querySelector("#redo").onclick = ()=>restart(words);
   root.querySelector("#again").onclick = ()=>{ quiz=null; UI.render(); };
   root.querySelector("#done").onclick  = ()=>{ quiz=null; UI.go("groups"); };
   quiz.qs = [];   /* 標記已結束 */
