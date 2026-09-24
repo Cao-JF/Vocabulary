@@ -181,6 +181,10 @@ tr.dup{opacity:.5}
 .match .opt{font-size:14px;padding:12px;min-height:50px;text-align:center}
 .match .opt.sel{border-color:var(--accent);background:var(--surface-2)}
 .match .opt.done{opacity:.25;pointer-events:none;border-style:dashed}
+/* 拼字題每個區塊都固定高度，答題回饋與換題時輸入框的位置不會跳動 */
+.spellq .qprompt{min-height:2.6em;display:flex;align-items:center;justify-content:center;gap:6px;flex-wrap:wrap;margin:10px 0}
+.spellq .hintword{min-height:30px}
+.spellq .fb{min-height:2.9em;margin:4px 0 8px;display:flex;align-items:center;justify-content:center;font-size:15px;line-height:1.4}
 .spellbox{font-size:20px;text-align:center;letter-spacing:1px;font-family:ui-monospace,Menlo,monospace}
 /* 拼字框用 password 型別讓手機鍵盤不出選字提示；
    框裡的圓點與游標設成透明，再把實際輸入的字母疊在上面顯示 */
@@ -1778,7 +1782,8 @@ function renderQuiz(root){
      recall:(c,x)=>qSpell(c, x, false, true) })[q.type](card, q);
 }
 
-function next(){ quiz.i++; UI.render(); }
+/* 換題時保留捲動位置：整頁重畫的瞬間高度會縮，瀏覽器會把畫面拉回頂端 */
+function next(){ const y = window.scrollY; quiz.i++; UI.render(); window.scrollTo(0, y); }
 /* 作答後不自動跳題，顯示「下一題」按鈕，看完答案再自己按（Enter 也可以） */
 function waitNext(card, before){
   const last = quiz.i >= quiz.qs.length-1;
@@ -1856,11 +1861,13 @@ function qSpell(card, q, listen, noHint){
   const hint = (quizCfg.hint && !noHint)
     ? w.term.split("").map((c,i)=> (i===0 || !/[a-z]/i.test(c)) ? c : "_").join(" ")
     : "";
+  card.classList.add("spellq");
   card.innerHTML = `
     <h3>${listen? "聽發音，拼出單字" : noHint? "看中文，寫出完整的英文單字" : "依中文拼出英文單字"}</h3>
     <div class="qprompt small">${ listen ? '<button class="btn" data-speak="'+esc(w.term)+'">🔊 再播一次</button>'
         : senseHTML(s) }</div>
-    ${hint?'<div class="hintword">'+esc(hint)+'</div>':''}
+    <div class="hintword">${esc(hint)}</div>
+    <div class="fb" id="fb"></div>
     <div class="spellwrap">
       <input type="password" id="ans" class="spellbox" name="vocab-answer" autocomplete="off" data-lpignore="true" data-1p-ignore data-bwignore autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="輸入英文">
       <div class="spellshow"><span></span><i class="caret"></i></div>
@@ -1868,32 +1875,42 @@ function qSpell(card, q, listen, noHint){
     <div class="row" style="margin-top:12px">
       <button class="btn ghost" id="skip" style="flex:1">不會，看答案</button>
       <button class="btn primary" id="ok" style="flex:1">送出</button>
-    </div>
-    <div class="fb" id="fb"></div>`;
+    </div>`;
   const inp = card.querySelector("#ans");
   const shown = card.querySelector(".spellshow span");
   /* 游標固定在最後，避免在中間插字時畫面和實際內容對不上 */
   const sync = ()=>{ shown.textContent = inp.value; const n=inp.value.length; inp.setSelectionRange(n,n); };
-  inp.oninput = sync;
+  let answered = "";
+  /* 作答後不停用輸入框（停用會讓手機鍵盤收起來），只是把內容鎖在答案上 */
+  inp.oninput = ()=>{ if(quiz.answered) inp.value = answered; sync(); };
   inp.onfocus = inp.onclick = inp.onkeyup = sync;
-  setTimeout(()=>inp.focus(), 60);
+  /* 手機只允許在使用者操作（按「下一題」/ Enter）的當下叫出鍵盤，所以要同步 focus，不能延遲 */
+  inp.focus({ preventScroll:true });
+  if(document.activeElement!==inp) setTimeout(()=>inp.focus({ preventScroll:true }), 60);
   if(listen) Speech.say(w.term);
 
+  const okBtn = card.querySelector("#ok"), skipBtn = card.querySelector("#skip");
+  const goNext = ()=>{ quiz.answered = false; next(); };
   const submit = (give)=>{
     if(quiz.answered) return;
     const ok = !give && Store.norm(inp.value) === Store.norm(w.term);
     quiz.answered = true;
-    inp.disabled = true;
+    answered = inp.value;
     const fb = card.querySelector("#fb");
     fb.className = "fb "+(ok?"ok":"no");
     fb.textContent = ok ? "答對了" : ("正確答案："+w.term+"　"+sensesText(w));
     mark(w, ok);
     autoSay(w.term);
-    waitNext(card, ()=>{ quiz.answered=false; });
+    /* 「送出」原地變成「下一題」，按鈕位置不變，不會多長出一列 */
+    skipBtn.style.display = "none";
+    okBtn.textContent = quiz.i >= quiz.qs.length-1 ? "看結果" : "下一題 →";
+    inp.focus({ preventScroll:true });
   };
-  card.querySelector("#ok").onclick = ()=>submit(false);
-  card.querySelector("#skip").onclick = ()=>submit(true);
-  inp.onkeydown = e=>{ if(e.key==="Enter") submit(false); };
+  /* 按鈕按下時不搶焦點，輸入框保持 focus，鍵盤就不會收起來再彈出 */
+  [okBtn, skipBtn].forEach(b=>b.addEventListener("mousedown", e=>e.preventDefault()));
+  okBtn.onclick = ()=> quiz.answered ? goNext() : submit(false);
+  skipBtn.onclick = ()=>submit(true);
+  inp.onkeydown = e=>{ if(e.key==="Enter"){ e.preventDefault(); quiz.answered ? goNext() : submit(false); } };
 }
 
 /* --- 聽力 --- */
